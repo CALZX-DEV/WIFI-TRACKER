@@ -41,79 +41,135 @@ def banner():
 def pause():
     input("\nTekan ENTER untuk kembali...")
 
-def scan_wifi():
-    banner()
-    print(neon("[ WIFI SCAN ]"))
-    print(C["dim"] + "Meminta daftar jaringan yang terlihat..." + C["reset"] + "\n")
 
+def scan_wifi():
+    import json
+    import shutil
+    import subprocess
+    import time
+
+    banner()
+    print(CYAN + "[ WIFI SCANNER ]" + RESET)
+
+    # Periksa Termux:API
     if not shutil.which("termux-wifi-scaninfo"):
-        print(C["yellow"] + "[!] Perintah termux-wifi-scaninfo tidak ditemukan." + C["reset"])
-        print("Pastikan aplikasi Termux:API terpasang dan paket termux-api sudah diinstal.")
+        print(RED + "[ERROR] Termux:API belum tersedia." + RESET)
         pause()
         return
+
+    # Picu permintaan izin lokasi Android
+    if not shutil.which("termux-location"):
+        print(RED + "[ERROR] termux-location tidak ditemukan." + RESET)
+        pause()
+        return
+
+    print(YELLOW + "[INFO] Memeriksa izin lokasi..." + RESET)
+
+    try:
+        permission = subprocess.run(
+            ["termux-location", "-p", "network", "-r", "once"],
+            capture_output=True,
+            text=True,
+            timeout=25
+        )
+
+        if permission.returncode != 0:
+            print(RED + "[ERROR] Izin lokasi belum tersedia." + RESET)
+            print("Buka pengaturan Termux:API dan izinkan Location.")
+            subprocess.run([
+                "am", "start", "-a",
+                "android.settings.APPLICATION_DETAILS_SETTINGS",
+                "-d", "package:com.termux.api"
+            ])
+            pause()
+            return
+
+    except subprocess.TimeoutExpired:
+        print(RED + "[ERROR] Pemeriksaan izin melewati batas waktu." + RESET)
+        pause()
+        return
+
+    print(GREEN + "[OK] Pemeriksaan izin selesai." + RESET)
+    print(YELLOW + "[INFO] Membaca hasil scan WiFi..." + RESET)
 
     try:
         result = subprocess.run(
-            ["termux-wifi-scaninfo"], capture_output=True, text=True, timeout=25
+            ["termux-wifi-scaninfo"],
+            capture_output=True,
+            text=True,
+            timeout=20
         )
+
         if result.returncode != 0:
-            print(C["red"] + "[ERROR] Scan gagal." + C["reset"])
-            print((result.stderr or result.stdout).strip())
-            print("Periksa izin lokasi/perangkat terdekat dan aktifkan Location.")
+            print(RED + "[ERROR] Gagal membaca hasil WiFi." + RESET)
+            print(result.stderr)
             pause()
             return
+
         networks = json.loads(result.stdout or "[]")
-    except Exception as exc:
-        print(C["red"] + f"[ERROR] {exc}" + C["reset"])
+
+        unique = {}
+        for item in networks:
+            ssid = (item.get("ssid") or "").strip()
+            if ssid:
+                unique[ssid] = item
+
+        networks = sorted(
+            unique.values(),
+            key=lambda x: x.get("level", -999),
+            reverse=True
+        )
+
+        if not networks:
+            print(YELLOW + "[INFO] Belum ada hasil scan WiFi." + RESET)
+            print("Buka pengaturan WiFi Android, tunggu pemindaian selesai,")
+            print("kemudian kembali ke WIFI TRACKER dan scan lagi.")
+            pause()
+            return
+
+        print(GREEN + "\nWIFI TERDETEKSI:\n" + RESET)
+
+        for i, wifi in enumerate(networks, 1):
+            print(
+                f"{CYAN}[{i}]{RESET} "
+                f"{WHITE}{wifi['ssid']}{RESET}"
+            )
+            print(
+                f"Signal: {wifi.get('level', '?')} dBm"
+            )
+
+        choice = input("\nPilih nomor WiFi (0 kembali): ").strip()
+
+        if choice == "0":
+            return
+
+        if not choice.isdigit() or not 1 <= int(choice) <= len(networks):
+            print(RED + "Pilihan tidak valid." + RESET)
+            pause()
+            return
+
+        ssid = networks[int(choice) - 1]["ssid"]
+
+        print(f"\nWiFi dipilih: {GREEN}{ssid}{RESET}")
+
+        confirm = input(
+            "Lanjutkan pemeriksaan password lokal? (ya/tidak): "
+        ).lower()
+
+        if confirm in ("ya", "y"):
+            password_check(ssid)
+        else:
+            print(YELLOW + "[STOPPED] Dibatalkan." + RESET)
+            pause()
+
+    except subprocess.TimeoutExpired:
+        print(RED + "[ERROR] Pemindaian timeout." + RESET)
         pause()
-        return
 
-    # Deduplicate by SSID while retaining the strongest reported signal.
-    found = {}
-    for item in networks:
-        ssid = (item.get("ssid") or "").strip()
-        if not ssid:
-            continue
-        level = item.get("level", -999)
-        if ssid not in found or level > found[ssid].get("level", -999):
-            found[ssid] = item
-
-    items = list(found.values())
-    items.sort(key=lambda x: x.get("level", -999), reverse=True)
-
-    if not items:
-        print(C["yellow"] + "Tidak ada SSID yang terlihat." + C["reset"])
-        print("Pastikan Wi-Fi dan Location aktif, lalu coba lagi.")
+    except Exception as e:
+        print(RED + f"[ERROR] {e}" + RESET)
         pause()
-        return
 
-    print(C["white"] + "JARINGAN TERDETEKSI\n" + C["reset"])
-    for i, item in enumerate(items, 1):
-        ssid = item.get("ssid", "(tanpa nama)")
-        bssid = item.get("bssid", "-")
-        level = item.get("level", "?")
-        security = item.get("capabilities", "info tidak tersedia")
-        print(f"{C['cyan']}[{i:02d}]{C['reset']} {C['bold']}{ssid}{C['reset']}")
-        print(f"     Signal: {level} dBm | Security: {security}")
-    print(f"\n{C['dim']}Catatan: pemindaian hanya menampilkan jaringan; tidak mencoba masuk.{C['reset']}")
-
-    choice = input("\nPilih nomor Wi-Fi (0 untuk kembali): ").strip()
-    if choice == "0":
-        return
-    if not choice.isdigit() or not (1 <= int(choice) <= len(items)):
-        print(C["red"] + "Pilihan tidak valid." + C["reset"])
-        pause()
-        return
-
-    selected = items[int(choice) - 1]
-    ssid = selected.get("ssid", "(tanpa nama)")
-    print(f"\nTarget dipilih: {C['bold']}{ssid}{C['reset']}")
-    confirm = input("Lanjut ke pemeriksaan password milik Anda sendiri? (y/n): ").strip().lower()
-    if confirm != "y":
-        print(C["yellow"] + "[STOPPED] Proses dibatalkan." + C["reset"])
-        pause()
-        return
-    password_check(ssid)
 
 def password_check(ssid):
     banner()
